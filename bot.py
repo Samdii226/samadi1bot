@@ -8,7 +8,7 @@ import os
 import re
 import logging
 from io import BytesIO
-from typing import Optional, Tuple
+from typing import Optional
 from urllib.parse import urlparse
 
 # Third-party imports
@@ -101,7 +101,7 @@ def convert_image_format(image_data: bytes, format_type: str) -> BytesIO:
     img = Image.open(BytesIO(image_data))
     
     # Handle JPEG special case (no alpha channel)
-    if format_type.lower() == "jpeg":
+    if format_type.lower() == "jpeg" or format_type.lower() == "jpg":
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
     
@@ -243,6 +243,123 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Operation cancelled. Use /start to begin again."
     )
 
+# ===== NEW COMMAND: /image for direct image generation =====
+async def image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /image command - Generate image from prompt."""
+    # Get the prompt from the command arguments
+    prompt = " ".join(context.args)
+    
+    if not prompt:
+        await update.message.reply_text(
+            "🎨 *AI Image Generation*\n\n"
+            "Usage: `/image your prompt here`\n"
+            "Example: `/image a beautiful sunset over mountains`\n\n"
+            "Or use the menu button for more options!",
+            parse_mode="Markdown"
+        )
+        return
+    
+    await update.message.reply_text("🎨 Generating your image... This may take a moment.")
+    
+    image_data = generate_ai_image(prompt)
+    if image_data:
+        await update.message.reply_photo(
+            photo=BytesIO(image_data),
+            caption=f"🎨 *AI Generated Image*\n\nPrompt: {prompt}\n\nPowered by Pollinations.ai",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Failed to generate image. Please try again with a different prompt."
+        )
+
+# ===== NEW COMMAND: /shorten for direct URL shortening =====
+async def shorten_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /shorten command - Shorten URL directly."""
+    url = " ".join(context.args)
+    
+    if not url:
+        await update.message.reply_text(
+            "🔗 *URL Shortener*\n\n"
+            "Usage: `/shorten your_url_here`\n"
+            "Example: `/shorten https://www.example.com/very/long/url`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if not is_valid_url(url):
+        await update.message.reply_text(
+            "❌ Invalid URL. Please send a valid URL starting with http:// or https://"
+        )
+        return
+    
+    await update.message.reply_text("⏳ Shortening your URL...")
+    short_url = shorten_url(url)
+    
+    response = f"""
+🔗 *URL Shortened Successfully!*
+
+📎 *Original URL:*
+{url}
+
+📌 *Shortened URL:*
+{short_url}
+"""
+    await update.message.reply_text(response, parse_mode="Markdown")
+
+# ===== NEW COMMAND: /count for direct word counting =====
+async def count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /count command - Count words directly."""
+    text = " ".join(context.args)
+    
+    if not text:
+        await update.message.reply_text(
+            "📊 *Word Counter*\n\n"
+            "Usage: `/count your text here`\n"
+            "Example: `/count This is a sample text`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    stats = count_text_stats(text)
+    
+    response = f"""
+📊 *Text Analysis Results*
+
+📝 *Words:* {stats['words']}
+🔤 *Characters:* {stats['characters']}
+🔡 *Characters (no spaces):* {stats['characters_no_spaces']}
+📖 *Sentences:* {stats['sentences']}
+📄 *Paragraphs:* {stats['paragraphs']}
+📏 *Lines:* {stats['lines']}
+"""
+    await update.message.reply_text(response, parse_mode="Markdown")
+
+# ===== NEW COMMAND: /qr for direct QR generation =====
+async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /qr command - Generate QR code directly."""
+    data = " ".join(context.args)
+    
+    if not data:
+        await update.message.reply_text(
+            "📱 *QR Code Generator*\n\n"
+            "Usage: `/qr your text or URL here`\n"
+            "Example: `/qr https://t.me/samadi1bot`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        qr_image = generate_qr_code(data)
+        await update.message.reply_photo(
+            photo=qr_image,
+            caption=f"📱 *QR Code Generated*\n\nContent: {data[:100]}{'...' if len(data) > 100 else ''}",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.error(f"QR generation error: {e}")
+        await update.message.reply_text("❌ Error generating QR code. Please try again.")
+
 # ============================================================================
 # CALLBACK HANDLERS
 # ============================================================================
@@ -258,18 +375,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "shorten": (
             "🔗 *URL Shortener Mode*\n\n"
             "Please send me a URL to shorten.\n"
-            "Example: https://www.example.com/very/long/url"
+            "Example: https://www.example.com/very/long/url\n\n"
+            "Or use: `/shorten your_url`"
         ),
         "count": (
             "📊 *Word Counter Mode*\n\n"
             "Send me any text to analyze.\n"
-            "I'll count words, characters, sentences, and paragraphs."
+            "I'll count words, characters, sentences, and paragraphs.\n\n"
+            "Or use: `/count your text here`"
         ),
         "image_gen": (
             "🎨 *AI Image Generation Mode*\n\n"
             "Describe the image you want to generate.\n"
             "Example: 'A cat wearing a hat, digital art style'\n\n"
-            "⭐ Pro tip: Be specific for better results!"
+            "⭐ Pro tip: Be specific for better results!\n"
+            "Or use: `/image your prompt here`"
         ),
         "image_convert": (
             "🔄 *Image Converter Mode*\n\n"
@@ -286,13 +406,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "qr": (
             "📱 *QR Code Generator Mode*\n\n"
             "Send me text or a URL to generate a QR code.\n"
-            "Example: https://t.me/samadi1bot"
+            "Example: https://t.me/samadi1bot\n\n"
+            "Or use: `/qr your text here`"
         ),
         "help": (
             "ℹ️ *Help & Information*\n\n"
             "Samadi Bot is a multi-purpose utility bot.\n\n"
             "Use /help for detailed instructions.\n"
-            "Use /start to see the main menu."
+            "Use /start to see the main menu.\n\n"
+            "📌 *Quick Commands:*\n"
+            "/image prompt - Generate AI image\n"
+            "/shorten url - Shorten a URL\n"
+            "/count text - Count words\n"
+            "/qr text - Generate QR code"
         ),
     }
     
@@ -318,7 +444,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not mode:
         await update.message.reply_text(
-            "⚠️ Please use /start to choose a tool first!"
+            "⚠️ Please use /start to choose a tool first!\n\n"
+            "📌 *Quick commands:*\n"
+            "/image prompt - Generate AI image\n"
+            "/shorten url - Shorten a URL\n"
+            "/count text - Count words\n"
+            "/qr text - Generate QR code",
+            parse_mode="Markdown"
         )
         return
     
@@ -341,10 +473,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📌 *Shortened URL:*
 {short_url}
-
-🔢 *Original length:* {len(text)} characters
-🔢 *Shortened length:* {len(short_url)} characters
-💾 *Saved:* {len(text) - len(short_url)} characters
 """
         await update.message.reply_text(response, parse_mode="Markdown")
         context.user_data["mode"] = None
@@ -362,9 +490,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📖 *Sentences:* {stats['sentences']}
 📄 *Paragraphs:* {stats['paragraphs']}
 📏 *Lines:* {stats['lines']}
-
-📋 *Text Preview:*
-_{text[:200]}{'...' if len(text) > 200 else ''}_
 """
         await update.message.reply_text(response, parse_mode="Markdown")
         context.user_data["mode"] = None
@@ -383,7 +508,7 @@ _{text[:200]}{'...' if len(text) > 200 else ''}_
         if image_data:
             await update.message.reply_photo(
                 photo=BytesIO(image_data),
-                caption=f"🎨 *AI Generated Image*\n\nPrompt: {text}\n\nPowered by Pollinations.ai",
+                caption=f"🎨 *AI Generated Image*\n\nPrompt: {text}",
                 parse_mode="Markdown",
             )
         else:
@@ -441,8 +566,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== IMAGE CONVERTER =====
     if mode == "image_convert":
         format_type = caption.lower().strip()
-        
-        # Remove common punctuation and clean up
         format_type = re.sub(r'[^a-zA-Z]', '', format_type)
         
         if format_type not in SUPPORTED_FORMATS:
@@ -458,7 +581,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             photo_file = await update.message.photo[-1].get_file()
             image_data = await photo_file.download_as_bytearray()
             
-            # Handle JPEG special case
             output_format = "jpeg" if format_type == "jpg" else format_type
             converted = convert_image_format(image_data, output_format)
             
@@ -476,7 +598,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== IMAGE RESIZER =====
     elif mode == "image_resize":
-        # Parse dimensions from caption
         dimensions = re.search(r'(\d+)\s*[xX]\s*(\d+)', caption)
         
         if not dimensions:
@@ -521,12 +642,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     else:
         await update.message.reply_text(
-            "📸 Image received! Use /start to choose a tool first."
+            "📸 Image received! Use /start to choose a tool first.\n\n"
+            "📌 *Quick commands:*\n"
+            "/image prompt - Generate AI image\n"
+            "/shorten url - Shorten a URL\n"
+            "/count text - Count words\n"
+            "/qr text - Generate QR code",
+            parse_mode="Markdown"
         )
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle document messages (for image files)."""
-    # Check if it's an image file
     file = update.message.document
     mime_type = file.mime_type or ""
     
@@ -572,6 +698,12 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    
+    # NEW: Direct command handlers
+    application.add_handler(CommandHandler("image", image_command))
+    application.add_handler(CommandHandler("shorten", shorten_command))
+    application.add_handler(CommandHandler("count", count_command))
+    application.add_handler(CommandHandler("qr", qr_command))
     
     # Add callback query handler
     application.add_handler(CallbackQueryHandler(button_callback))
