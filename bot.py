@@ -7,7 +7,6 @@ Deployed on Railway with GitHub integration
 import os
 import re
 import logging
-import asyncio
 from io import BytesIO
 from typing import Optional, Tuple
 from urllib.parse import urlparse
@@ -25,7 +24,6 @@ from telegram.ext import (
 import requests
 from PIL import Image
 import qrcode
-import pyshorteners
 
 # ============================================================================
 # CONFIGURATION
@@ -39,7 +37,6 @@ if not TOKEN:
 # Constants
 MAX_IMAGE_DIMENSION = 4000
 SUPPORTED_FORMATS = ["jpeg", "png", "webp", "jpg"]
-DEFAULT_IMAGE_SIZE = (512, 512)
 API_TIMEOUT = 30
 
 # Logging setup
@@ -113,7 +110,7 @@ def convert_image_format(image_data: bytes, format_type: str) -> BytesIO:
     output.seek(0)
     return output
 
-async def generate_ai_image(prompt: str) -> Optional[bytes]:
+def generate_ai_image(prompt: str) -> Optional[bytes]:
     """Generate image using Pollinations.ai API."""
     try:
         # Clean prompt for URL
@@ -121,37 +118,38 @@ async def generate_ai_image(prompt: str) -> Optional[bytes]:
         # Add style enhancements
         enhanced_prompt = f"{clean_prompt}, high quality, detailed"
         
-        url = f"https://image.pollinations.ai/prompt/{enhanced_prompt}"
+        url = f"https://image.pollinations.ai/prompt/{enhanced_prompt}?width=512&height=512&nologo=true"
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=API_TIMEOUT) as response:
-                if response.status == 200:
-                    return await response.read()
-                return None
+        response = requests.get(url, timeout=API_TIMEOUT)
+        if response.status_code == 200:
+            return response.content
+        return None
     except Exception as e:
         logger.error(f"AI Image generation error: {e}")
         return None
 
-async def shorten_url(url: str) -> str:
-    """Shorten URL using multiple services with fallback."""
-    services = [
-        ("is.gd", f"https://is.gd/create.php?format=json&url={url}"),
-        ("tinyurl", f"https://tinyurl.com/api-create.php?url={url}"),
-    ]
-    
-    for service_name, api_url in services:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(api_url, timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.text()
-                        if data and "error" not in data.lower():
-                            return data.strip()
-        except Exception as e:
-            logger.warning(f"{service_name} failed: {e}")
-            continue
-    
-    return "❌ Error: Unable to shorten URL. Please try again."
+def shorten_url(url: str) -> str:
+    """Shorten URL using is.gd API."""
+    try:
+        response = requests.get(
+            f"https://is.gd/create.php",
+            params={
+                "format": "json",
+                "url": url
+            },
+            timeout=10
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if "shorturl" in data:
+                return data["shorturl"]
+            else:
+                return f"Error: {data.get('errormessage', 'Unknown error')}"
+        else:
+            return "Error: Failed to shorten URL"
+    except Exception as e:
+        logger.error(f"URL shortening error: {e}")
+        return f"Error: {str(e)}"
 
 # ============================================================================
 # BOT HANDLERS
@@ -160,6 +158,7 @@ async def shorten_url(url: str) -> str:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command - Show main menu."""
     user = update.effective_user
+    
     welcome_text = f"""
 🤖 *Welcome to Samadi Bot, {user.first_name}!*
 
@@ -195,6 +194,8 @@ Made with ❤️ for your daily tasks
         reply_markup=reply_markup,
         parse_mode="Markdown",
     )
+    
+    logger.info(f"User {user.username} started the bot")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command."""
@@ -232,8 +233,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start - Show main menu
 /help - Show this help
 /cancel - Cancel current operation
-
-For support: @YourSupportUsername
 """
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -254,6 +253,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     data = query.data
+    
     messages = {
         "shorten": (
             "🔗 *URL Shortener Mode*\n\n"
@@ -302,6 +302,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
         context.user_data["mode"] = data
+        logger.info(f"User {update.effective_user.username} selected mode: {data}")
 
 # ============================================================================
 # MESSAGE HANDLERS
@@ -312,6 +313,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text
     mode = context.user_data.get("mode")
+    
+    logger.info(f"Text from {user.username}: {text[:50]}... Mode: {mode}")
     
     if not mode:
         await update.message.reply_text(
@@ -328,7 +331,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         await update.message.reply_text("⏳ Shortening your URL...")
-        short_url = await shorten_url(text)
+        short_url = shorten_url(text)
         
         response = f"""
 🔗 *URL Shortened Successfully!*
@@ -376,7 +379,7 @@ _{text[:200]}{'...' if len(text) > 200 else ''}_
         
         await update.message.reply_text("🎨 Generating your image... This may take a moment.")
         
-        image_data = await generate_ai_image(text)
+        image_data = generate_ai_image(text)
         if image_data:
             await update.message.reply_photo(
                 photo=BytesIO(image_data),
@@ -432,6 +435,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo messages for conversion and resizing."""
     mode = context.user_data.get("mode")
     caption = update.message.caption or ""
+    
+    logger.info(f"Photo received. Mode: {mode}, Caption: {caption}")
     
     # ===== IMAGE CONVERTER =====
     if mode == "image_convert":
