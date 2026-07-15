@@ -53,10 +53,23 @@ logger = logging.getLogger(__name__)
 def is_valid_url(url: str) -> bool:
     """Check if the string is a valid URL."""
     try:
+        # Add http:// if no scheme is present
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
         result = urlparse(url)
         return all([result.scheme, result.netloc])
     except:
         return False
+
+def clean_url(url: str) -> str:
+    """Clean and format URL."""
+    url = url.strip()
+    # Remove any trailing punctuation
+    url = re.sub(r'[.,;!?]+$', '', url)
+    # Add https:// if no scheme
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    return url
 
 def count_text_stats(text: str) -> dict:
     """Analyze text and return statistics."""
@@ -128,11 +141,17 @@ def generate_ai_image(prompt: str) -> Optional[bytes]:
         logger.error(f"AI Image generation error: {e}")
         return None
 
-def shorten_url(url: str) -> str:
-    """Shorten URL using is.gd API."""
+def shorten_url(url: str) -> tuple:
+    """
+    Shorten URL using multiple services with fallback.
+    Returns: (shortened_url, service_name, error_message)
+    """
+    url = clean_url(url)
+    
+    # Service 1: is.gd (Primary)
     try:
         response = requests.get(
-            f"https://is.gd/create.php",
+            "https://is.gd/create.php",
             params={
                 "format": "json",
                 "url": url
@@ -142,14 +161,46 @@ def shorten_url(url: str) -> str:
         if response.status_code == 200:
             data = response.json()
             if "shorturl" in data:
-                return data["shorturl"]
-            else:
-                return f"Error: {data.get('errormessage', 'Unknown error')}"
+                return (data["shorturl"], "is.gd", None)
+            elif "errormessage" in data:
+                logger.warning(f"is.gd error: {data['errormessage']}")
         else:
-            return "Error: Failed to shorten URL"
+            logger.warning(f"is.gd status: {response.status_code}")
     except Exception as e:
-        logger.error(f"URL shortening error: {e}")
-        return f"Error: {str(e)}"
+        logger.warning(f"is.gd failed: {e}")
+    
+    # Service 2: TinyURL (Fallback 1)
+    try:
+        response = requests.get(
+            "https://tinyurl.com/api-create.php",
+            params={"url": url},
+            timeout=10
+        )
+        if response.status_code == 200:
+            short_url = response.text.strip()
+            if short_url and "error" not in short_url.lower():
+                return (short_url, "tinyurl.com", None)
+        else:
+            logger.warning(f"TinyURL status: {response.status_code}")
+    except Exception as e:
+        logger.warning(f"TinyURL failed: {e}")
+    
+    # Service 3: Shrtcode (Fallback 2)
+    try:
+        response = requests.get(
+            f"https://api.shrtco.de/v2/shorten",
+            params={"url": url},
+            timeout=10
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("ok") and "result" in data:
+                return (data["result"]["short_link"], "shrtco.de", None)
+    except Exception as e:
+        logger.warning(f"Shrtcode failed: {e}")
+    
+    # All services failed
+    return (None, None, "All URL shortening services are currently unavailable. Please try again later.")
 
 # ============================================================================
 # BOT HANDLERS
@@ -205,6 +256,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔗 *URL Shortener*
 • Send any URL starting with http:// or https://
 • Get a shortened link instantly
+• Example: `/shorten https://t.me/Trading_Forex_Quotex_Signals`
 
 📊 *Word Counter*
 • Send any text
@@ -212,8 +264,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🎨 *AI Image Generation*
 • Describe what you want to see
-• Example: "A beautiful sunset over mountains"
-• Powered by Pollinations.ai (free)
+• Example: "/image A beautiful sunset over mountains"
 
 🔄 *Image Converter*
 • Send an image with format in caption
@@ -233,6 +284,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start - Show main menu
 /help - Show this help
 /cancel - Cancel current operation
+/image prompt - Generate AI image
+/shorten url - Shorten a URL
+/count text - Count words
+/qr text - Generate QR code
 """
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -243,10 +298,9 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Operation cancelled. Use /start to begin again."
     )
 
-# ===== NEW COMMAND: /image for direct image generation =====
+# ===== COMMAND: /image for direct image generation =====
 async def image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /image command - Generate image from prompt."""
-    # Get the prompt from the command arguments
     prompt = " ".join(context.args)
     
     if not prompt:
@@ -265,7 +319,7 @@ async def image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if image_data:
         await update.message.reply_photo(
             photo=BytesIO(image_data),
-            caption=f"🎨 *AI Generated Image*\n\nPrompt: {prompt}\n\nPowered by Pollinations.ai",
+            caption=f"🎨 *AI Generated Image*\n\nPrompt: {prompt}",
             parse_mode="Markdown",
         )
     else:
@@ -273,7 +327,7 @@ async def image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Failed to generate image. Please try again with a different prompt."
         )
 
-# ===== NEW COMMAND: /shorten for direct URL shortening =====
+# ===== COMMAND: /shorten for direct URL shortening =====
 async def shorten_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /shorten command - Shorten URL directly."""
     url = " ".join(context.args)
@@ -282,21 +336,26 @@ async def shorten_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🔗 *URL Shortener*\n\n"
             "Usage: `/shorten your_url_here`\n"
-            "Example: `/shorten https://www.example.com/very/long/url`",
+            "Example: `/shorten https://t.me/Trading_Forex_Quotex_Signals`",
             parse_mode="Markdown"
         )
         return
     
+    await update.message.reply_text("⏳ Shortening your URL...")
+    
+    # Clean and validate URL
+    url = clean_url(url)
     if not is_valid_url(url):
         await update.message.reply_text(
             "❌ Invalid URL. Please send a valid URL starting with http:// or https://"
         )
         return
     
-    await update.message.reply_text("⏳ Shortening your URL...")
-    short_url = shorten_url(url)
+    # Shorten the URL
+    short_url, service, error = shorten_url(url)
     
-    response = f"""
+    if short_url:
+        response = f"""
 🔗 *URL Shortened Successfully!*
 
 📎 *Original URL:*
@@ -304,10 +363,23 @@ async def shorten_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📌 *Shortened URL:*
 {short_url}
-"""
-    await update.message.reply_text(response, parse_mode="Markdown")
 
-# ===== NEW COMMAND: /count for direct word counting =====
+🔢 *Original length:* {len(url)} characters
+🔢 *Shortened length:* {len(short_url)} characters
+💾 *Saved:* {len(url) - len(short_url)} characters
+🏷️ *Service:* {service}
+"""
+        await update.message.reply_text(response, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(
+            f"❌ {error}\n\n"
+            "Please try:\n"
+            "1. Sending the URL directly\n"
+            "2. Using the button menu\n"
+            "3. Or try again in a few minutes"
+        )
+
+# ===== COMMAND: /count for direct word counting =====
 async def count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /count command - Count words directly."""
     text = " ".join(context.args)
@@ -335,7 +407,7 @@ async def count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     await update.message.reply_text(response, parse_mode="Markdown")
 
-# ===== NEW COMMAND: /qr for direct QR generation =====
+# ===== COMMAND: /qr for direct QR generation =====
 async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /qr command - Generate QR code directly."""
     data = " ".join(context.args)
@@ -344,7 +416,7 @@ async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "📱 *QR Code Generator*\n\n"
             "Usage: `/qr your text or URL here`\n"
-            "Example: `/qr https://t.me/samadi1bot`",
+            "Example: `/qr https://t.me/Trading_Forex_Quotex_Signals`",
             parse_mode="Markdown"
         )
         return
@@ -406,7 +478,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "qr": (
             "📱 *QR Code Generator Mode*\n\n"
             "Send me text or a URL to generate a QR code.\n"
-            "Example: https://t.me/samadi1bot\n\n"
+            "Example: https://t.me/Trading_Forex_Quotex_Signals\n\n"
             "Or use: `/qr your text here`"
         ),
         "help": (
@@ -456,26 +528,39 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== URL SHORTENER =====
     if mode == "shorten":
-        if not is_valid_url(text):
+        # Clean and validate URL
+        url = clean_url(text)
+        if not is_valid_url(url):
             await update.message.reply_text(
-                "❌ Invalid URL. Please send a valid URL starting with http:// or https://"
+                "❌ Invalid URL. Please send a valid URL starting with http:// or https://\n"
+                "Example: https://www.example.com"
             )
             return
         
         await update.message.reply_text("⏳ Shortening your URL...")
-        short_url = shorten_url(text)
+        short_url, service, error = shorten_url(url)
         
-        response = f"""
+        if short_url:
+            response = f"""
 🔗 *URL Shortened Successfully!*
 
 📎 *Original URL:*
-{text}
+{url}
 
 📌 *Shortened URL:*
 {short_url}
+
+🏷️ *Service:* {service}
 """
-        await update.message.reply_text(response, parse_mode="Markdown")
-        context.user_data["mode"] = None
+            await update.message.reply_text(response, parse_mode="Markdown")
+            context.user_data["mode"] = None
+        else:
+            await update.message.reply_text(
+                f"❌ {error}\n\n"
+                "Please try:\n"
+                "1. Using the /shorten command\n"
+                "2. Or try again in a few minutes"
+            )
     
     # ===== WORD COUNTER =====
     elif mode == "count":
@@ -677,7 +762,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if update and update.effective_message:
             await update.effective_message.reply_text(
-                "⚠️ An error occurred. Please try again or use /start to restart."
+                "⚠️ An error occurred. Please try again or use /start to restart.\n\n"
+                "If the problem persists, try using the /shorten command directly."
             )
     except:
         pass
@@ -699,7 +785,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     
-    # NEW: Direct command handlers
+    # Direct command handlers
     application.add_handler(CommandHandler("image", image_command))
     application.add_handler(CommandHandler("shorten", shorten_command))
     application.add_handler(CommandHandler("count", count_command))
